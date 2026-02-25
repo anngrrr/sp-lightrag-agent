@@ -1,9 +1,20 @@
 import os
+from typing import Any, cast
 
-from langchain_ollama import ChatOllama
 from dotenv import load_dotenv
+from langchain_ollama import ChatOllama
+from langgraph.graph import END, START, StateGraph
+from typing_extensions import TypedDict
 
-from app.models.schemas import ChatOutput, ErrorInfo, GraphState, RetrievedChunk
+from app.models.schemas import (
+    Citation,
+    ChatInput,
+    ChatOutput,
+    ErrorInfo,
+    GraphState,
+    RetrievedChunk,
+)
+from app.rag.retriever import retrieve
 
 load_dotenv()
 
@@ -13,17 +24,25 @@ OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
 MAX_CONTEXT_CHARS = int(os.getenv("RAG_CONTEXT_MAX_CHARS", "12000"))
 MAX_RESPONSE_CHARS = int(os.getenv("RAG_RESPONSE_MAX_CHARS", "1800"))
 MAX_CHUNKS_FOR_CONTEXT = int(os.getenv("RAG_MAX_CHUNKS_FOR_CONTEXT", "8"))
+MAX_CITATIONS = int(os.getenv("RAG_MAX_CITATIONS", "5"))
 
 _LLM: ChatOllama | None = None
+_GRAPH: Any | None = None
+
+
+class AgentState(TypedDict):
+    user_input: ChatInput
+    retrieved_chunks: list[RetrievedChunk]
+    answer: str | None
+    citations: list[Citation]
+    error: ErrorInfo | None
 
 
 def _get_llm() -> ChatOllama:
     global _LLM
     if _LLM is None:
         if not OLLAMA_MODEL or not OLLAMA_HOST:
-            raise RuntimeError(
-                "OLLAMA_MODEL and OLLAMA_HOST must be set in .env"
-            )
+            raise RuntimeError("OLLAMA_MODEL and OLLAMA_HOST must be set in .env")
         if not OLLAMA_API_KEY:
             raise RuntimeError("OLLAMA_API_KEY must be set in .env")
 
@@ -72,52 +91,76 @@ def _response_to_text(content: object) -> str:
     return ""
 
 
-def generate_node(state: GraphState) -> GraphState:
-    """Generate answer from retrieved chunks via Ollama."""
-    context = _build_context(state.retrieved_chunks)
+def _coerce_state(state: AgentState) -> GraphState:
+    return GraphState.model_validate(state)
+
+
+def retrieve_node(state: AgentState) -> dict[str, object]:
+    graph_state = _coerce_state(state)
+    question = graph_state.user_input.question
+    chunks = retrieve(question)
+    return {"retrieved_chunks": [chunk.model_dump() for chunk in chunks]}
+
+
+def generate_node(state: AgentState) -> dict[str, object]:
+    graph_state = _coerce_state(state)
+    context = _build_context(graph_state.retrieved_chunks)
     if not context:
-        state.answer = "Недостаточно релевантного контекста в базе знаний, чтобы дать точный ответ."
-        state.error = ErrorInfo(
-            code="no_context",
-            message="No relevant chunks were retrieved for generation.",
-        )
-        return state
+        return {
+            "answer": "Not enough relevant context in the knowledge base for a grounded answer.",
+            "error": ErrorInfo(
+                code="no_context",
+                message="No relevant chunks were retrieved for generation.",
+            ).model_dump(),
+        }
 
     system_prompt = (
-        "Ты помощник по строительным нормам и правилам. "
-        "Отвечай только на основе переданного контекста. "
-        "Если в контексте нет точного основания, прямо скажи, что данных недостаточно. "
-        "Не выдумывай факты, номера пунктов или нормативные документы. "
-        "Пиши коротко и по делу."
+        "You are an assistant for construction standards and rules. "
+        "If the user question is outside this domain, refuse to answer and say: "
+        "'I can only answer questions about construction standards and rules.' "
+        "Answer only from provided context. "
+        "If context is insufficient or unrelated to the question, explicitly say so. "
+        "Do not invent facts, clause numbers, or documents. "
+        "Keep the answer concise."
     )
     human_prompt = (
-        f"Вопрос пользователя:\n{state.user_input.question}\n\n"
-        f"Контекст:\n{context}\n\n"
-        "Требования к ответу:\n"
-        "1) Краткий прямой ответ.\n"
-        "2) Только факты из контекста.\n"
-        "3) Если данных не хватает - так и напиши.\n"
+        f"User question:\n{graph_state.user_input.question}\n\n"
+        f"Context:\n{context}\n\n"
+        "Answer requirements:\n"
+        "1) Short direct answer.\n"
+        "2) Only facts from context.\n"
+        "3) Say when context is insufficient.\n"
     )
 
     try:
         llm = _get_llm()
-        response = llm.invoke(
-            [
-                ("system", system_prompt),
-                ("human", human_prompt),
-            ]
-        )
-        state.answer = _truncate_answer(_response_to_text(response.content).strip())
-        state.error = None
+        response = llm.invoke([("system", system_prompt), ("human", human_prompt)])
+        answer = _truncate_answer(_response_to_text(response.content).strip())
+        return {"answer": answer, "error": None}
     except Exception as exc:
-        state.answer = "Не удалось сгенерировать ответ. Проверьте доступность Ollama."
-        state.error = ErrorInfo(code="llm_error", message=str(exc))
+        return {
+            "answer": "Failed to generate answer. Check Ollama connectivity and credentials.",
+            "error": ErrorInfo(code="llm_error", message=str(exc)).model_dump(),
+        }
 
-    return state
+
+def citations_node(state: AgentState) -> dict[str, object]:
+    graph_state = _coerce_state(state)
+    citations: list[Citation] = []
+    for chunk in graph_state.retrieved_chunks[:MAX_CITATIONS]:
+        quote = chunk.content.strip().replace("\n", " ")
+        quote = quote[:220].rstrip()
+        citations.append(
+            Citation(
+                source=chunk.source,
+                chunk_id=chunk.chunk_id,
+                quote=quote,
+            )
+        )
+    return {"citations": [citation.model_dump() for citation in citations]}
 
 
 def state_to_output(state: GraphState) -> ChatOutput:
-    """Map graph state to UI response contract."""
     return ChatOutput(
         answer=state.answer or "",
         citations=state.citations,
@@ -125,6 +168,28 @@ def state_to_output(state: GraphState) -> ChatOutput:
     )
 
 
-def build_graph() -> None:
-    """Placeholder for LangGraph compilation."""
-    return None
+def build_graph() -> Any:
+    global _GRAPH
+    if _GRAPH is not None:
+        return _GRAPH
+
+    builder = StateGraph(cast(Any, AgentState))
+    builder.add_node("retrieve", retrieve_node)
+    builder.add_node("generate", generate_node)
+    builder.add_node("citations", citations_node)
+
+    builder.add_edge(START, "retrieve")
+    builder.add_edge("retrieve", "generate")
+    builder.add_edge("generate", "citations")
+    builder.add_edge("citations", END)
+
+    _GRAPH = builder.compile()
+    return _GRAPH
+
+
+def run_agent(question: str) -> ChatOutput:
+    graph = build_graph()
+    init_state = GraphState(user_input=ChatInput(question=question))
+    result = graph.invoke(init_state.model_dump())
+    final_state = GraphState.model_validate(result)
+    return state_to_output(final_state)
