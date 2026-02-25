@@ -7,6 +7,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 
+import numpy as np
 from dotenv import load_dotenv
 from lightrag import LightRAG, QueryParam
 from lightrag.llm.ollama import ollama_embed, ollama_model_complete
@@ -18,10 +19,15 @@ from app.models.schemas import RetrievedChunk
 load_dotenv()
 
 LOGGER = logging.getLogger(__name__)
-RETRIEVE_MODE = os.getenv("RAG_RETRIEVE_MODE", "mix")
-RETRIEVE_TOP_K = int(os.getenv("RAG_RETRIEVE_TOP_K", "8"))
-RETRIEVE_CHUNK_TOP_K = int(os.getenv("RAG_RETRIEVE_CHUNK_TOP_K", "8"))
+RETRIEVE_MODE = os.getenv("RAG_RETRIEVE_MODE", "hybrid")
+RETRIEVE_TOP_K = int(os.getenv("RAG_RETRIEVE_TOP_K", "24"))
+RETRIEVE_CHUNK_TOP_K = int(os.getenv("RAG_RETRIEVE_CHUNK_TOP_K", "12"))
 RETRIEVE_TIMEOUT_SEC = float(os.getenv("RAG_RETRIEVE_TIMEOUT_SEC", "20"))
+RAG_ENABLE_RERANK = os.getenv("RAG_ENABLE_RERANK", "false").lower() == "true"
+RAG_MAX_ENTITY_TOKENS = int(os.getenv("RAG_MAX_ENTITY_TOKENS", "8000"))
+RAG_MAX_RELATION_TOKENS = int(os.getenv("RAG_MAX_RELATION_TOKENS", "8000"))
+RAG_MAX_TOTAL_TOKENS = int(os.getenv("RAG_MAX_TOTAL_TOKENS", "16000"))
+RAG_KEYWORD_LLM_TIMEOUT_SEC = float(os.getenv("RAG_KEYWORD_LLM_TIMEOUT_SEC", "120"))
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
 OLLAMA_LLM_HOST = os.getenv("OLLAMA_LLM_HOST")
 OLLAMA_LLM_MODEL = os.getenv("OLLAMA_LLM_MODEL")
@@ -33,9 +39,9 @@ _EXECUTOR = ThreadPoolExecutor(max_workers=1)
 _VALID_RETRIEVE_MODES = {"local", "global", "hybrid", "naive", "mix", "bypass"}
 
 
-def _resolve_mode(raw_mode: str) -> Literal[
-    "local", "global", "hybrid", "naive", "mix", "bypass"
-]:
+def _resolve_mode(
+    raw_mode: str,
+) -> Literal["local", "global", "hybrid", "naive", "mix", "bypass"]:
     if raw_mode in _VALID_RETRIEVE_MODES:
         return raw_mode  # type: ignore[return-value]
     return "mix"
@@ -68,8 +74,17 @@ def _build_embedding_func(storage_dir: Path) -> EmbeddingFunc:
         embedding_dim=embedding_dim,
         max_token_size=8192,
         model_name=None,
-        func=partial(ollama_embed.func, **embed_kwargs),
+        func=partial(_normalized_ollama_embed, **embed_kwargs),
     )
+
+
+async def _normalized_ollama_embed(
+    texts: list[str], max_token_size: int | None = None, **kwargs: Any
+) -> np.ndarray:
+    vectors = await ollama_embed.func(texts, max_token_size=max_token_size, **kwargs)
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    safe_norms = np.where(norms == 0, 1.0, norms)
+    return (vectors / safe_norms).astype(np.float32)
 
 
 def _get_rag() -> LightRAG:
@@ -82,9 +97,11 @@ def _get_rag() -> LightRAG:
     if not OLLAMA_LLM_MODEL:
         raise RuntimeError("OLLAMA_LLM_MODEL must be set in .env")
 
-    llm_kwargs: dict[str, str] = {"host": OLLAMA_LLM_HOST} if OLLAMA_LLM_HOST else {}
+    llm_kwargs: dict[str, Any] = {"host": OLLAMA_LLM_HOST} if OLLAMA_LLM_HOST else {}
     if OLLAMA_API_KEY:
         llm_kwargs["api_key"] = OLLAMA_API_KEY
+    llm_kwargs["timeout"] = RAG_KEYWORD_LLM_TIMEOUT_SEC
+    llm_kwargs["options"] = {"temperature": 0}
     _RAG_INSTANCE = LightRAG(
         working_dir=str(storage_dir),
         llm_model_func=ollama_model_complete,
@@ -104,6 +121,10 @@ def _query_data(question: str) -> dict[str, Any]:
             mode=_resolve_mode(RETRIEVE_MODE),
             top_k=RETRIEVE_TOP_K,
             chunk_top_k=RETRIEVE_CHUNK_TOP_K,
+            enable_rerank=RAG_ENABLE_RERANK,
+            max_entity_tokens=RAG_MAX_ENTITY_TOKENS,
+            max_relation_tokens=RAG_MAX_RELATION_TOKENS,
+            max_total_tokens=RAG_MAX_TOTAL_TOKENS,
         ),
     )
 
@@ -117,7 +138,9 @@ def retrieve(question: str) -> list[RetrievedChunk]:
     try:
         result = future.result(timeout=RETRIEVE_TIMEOUT_SEC)
     except FuturesTimeoutError:
-        LOGGER.warning("LightRAG retrieval timed out after %.1f sec", RETRIEVE_TIMEOUT_SEC)
+        LOGGER.warning(
+            "LightRAG retrieval timed out after %.1f sec", RETRIEVE_TIMEOUT_SEC
+        )
         return []
     except Exception as exc:
         LOGGER.exception("LightRAG retrieval failed: %s", exc)

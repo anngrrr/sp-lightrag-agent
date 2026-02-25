@@ -18,10 +18,10 @@ from app.rag.retriever import retrieve
 
 load_dotenv()
 
-MAX_CONTEXT_CHARS = int(os.getenv("RAG_CONTEXT_MAX_CHARS", "12000"))
+MAX_CONTEXT_CHARS = int(os.getenv("RAG_CONTEXT_MAX_CHARS", "18000"))
 MAX_RESPONSE_CHARS = int(os.getenv("RAG_RESPONSE_MAX_CHARS", "1800"))
-MAX_CHUNKS_FOR_CONTEXT = int(os.getenv("RAG_MAX_CHUNKS_FOR_CONTEXT", "8"))
-MAX_CITATIONS = int(os.getenv("RAG_MAX_CITATIONS", "5"))
+MAX_CHUNKS_FOR_CONTEXT = int(os.getenv("RAG_MAX_CHUNKS_FOR_CONTEXT", "12"))
+MAX_CITATIONS = int(os.getenv("RAG_MAX_CITATIONS", "8"))
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
 OLLAMA_LLM_HOST = os.getenv("OLLAMA_LLM_HOST")
 OLLAMA_LLM_MODEL = os.getenv("OLLAMA_LLM_MODEL")
@@ -42,7 +42,9 @@ def _get_llm() -> ChatOllama:
     global _LLM
     if _LLM is None:
         if not OLLAMA_LLM_MODEL or not OLLAMA_LLM_HOST:
-            raise RuntimeError("OLLAMA_LLM_MODEL and OLLAMA_LLM_HOST must be set in .env")
+            raise RuntimeError(
+                "OLLAMA_LLM_MODEL and OLLAMA_LLM_HOST must be set in .env"
+            )
         if not OLLAMA_API_KEY:
             raise RuntimeError("OLLAMA_API_KEY must be set in .env")
 
