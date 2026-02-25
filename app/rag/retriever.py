@@ -7,14 +7,12 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 
-import numpy as np
 from dotenv import load_dotenv
 from lightrag import LightRAG, QueryParam
 from lightrag.llm.ollama import ollama_embed, ollama_model_complete
 from lightrag.utils import EmbeddingFunc
 
 from app.config import resolve_lightrag_dir
-from app.models.schemas import RetrievedChunk
 
 load_dotenv()
 
@@ -23,6 +21,8 @@ RETRIEVE_MODE = os.getenv("RAG_RETRIEVE_MODE", "hybrid")
 RETRIEVE_TOP_K = int(os.getenv("RAG_RETRIEVE_TOP_K", "24"))
 RETRIEVE_CHUNK_TOP_K = int(os.getenv("RAG_RETRIEVE_CHUNK_TOP_K", "12"))
 RETRIEVE_TIMEOUT_SEC = float(os.getenv("RAG_RETRIEVE_TIMEOUT_SEC", "20"))
+RAG_RESPONSE_TYPE = os.getenv("RAG_RESPONSE_TYPE", "Multiple Paragraphs")
+RAG_INCLUDE_REFERENCES = os.getenv("RAG_INCLUDE_REFERENCES", "true").lower() == "true"
 RAG_MAX_ENTITY_TOKENS = int(os.getenv("RAG_MAX_ENTITY_TOKENS", "8000"))
 RAG_MAX_RELATION_TOKENS = int(os.getenv("RAG_MAX_RELATION_TOKENS", "8000"))
 RAG_MAX_TOTAL_TOKENS = int(os.getenv("RAG_MAX_TOTAL_TOKENS", "16000"))
@@ -73,17 +73,8 @@ def _build_embedding_func(storage_dir: Path) -> EmbeddingFunc:
         embedding_dim=embedding_dim,
         max_token_size=8192,
         model_name=None,
-        func=partial(_normalized_ollama_embed, **embed_kwargs),
+        func=partial(ollama_embed.func, **embed_kwargs),
     )
-
-
-async def _normalized_ollama_embed(
-    texts: list[str], max_token_size: int | None = None, **kwargs: Any
-) -> np.ndarray:
-    vectors = await ollama_embed.func(texts, max_token_size=max_token_size, **kwargs)
-    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-    safe_norms = np.where(norms == 0, 1.0, norms)
-    return (vectors / safe_norms).astype(np.float32)
 
 
 def _get_rag() -> LightRAG:
@@ -112,64 +103,68 @@ def _get_rag() -> LightRAG:
     return _RAG_INSTANCE
 
 
-def _query_data(question: str) -> dict[str, Any]:
-    rag = _get_rag()
-    return rag.query_data(
-        question,
-        param=QueryParam(
-            mode=_resolve_mode(RETRIEVE_MODE),
-            top_k=RETRIEVE_TOP_K,
-            chunk_top_k=RETRIEVE_CHUNK_TOP_K,
-            enable_rerank=False,
-            max_entity_tokens=RAG_MAX_ENTITY_TOKENS,
-            max_relation_tokens=RAG_MAX_RELATION_TOKENS,
-            max_total_tokens=RAG_MAX_TOTAL_TOKENS,
-        ),
+def _build_query_param() -> QueryParam:
+    return QueryParam(
+        mode=_resolve_mode(RETRIEVE_MODE),
+        top_k=RETRIEVE_TOP_K,
+        chunk_top_k=RETRIEVE_CHUNK_TOP_K,
+        enable_rerank=False,
+        max_entity_tokens=RAG_MAX_ENTITY_TOKENS,
+        max_relation_tokens=RAG_MAX_RELATION_TOKENS,
+        max_total_tokens=RAG_MAX_TOTAL_TOKENS,
+        response_type=RAG_RESPONSE_TYPE,
+        include_references=RAG_INCLUDE_REFERENCES,
     )
 
 
-def retrieve(question: str) -> list[RetrievedChunk]:
-    """Retrieve relevant chunks from local LightRAG storage."""
-    if not question.strip():
-        return []
+def _query_llm(question: str) -> dict[str, Any]:
+    rag = _get_rag()
+    return rag.query_llm(question, param=_build_query_param())
 
-    future = _EXECUTOR.submit(_query_data, question)
+
+def query_native(question: str) -> dict[str, Any]:
+    """Run native LightRAG retrieval + generation pipeline."""
+    if not question.strip():
+        return {
+            "status": "failure",
+            "message": "Question is empty",
+            "data": {},
+            "metadata": {},
+            "llm_response": {
+                "content": "",
+                "response_iterator": None,
+                "is_streaming": False,
+            },
+        }
+
+    future = _EXECUTOR.submit(_query_llm, question)
     try:
-        result = future.result(timeout=RETRIEVE_TIMEOUT_SEC)
+        return future.result(timeout=RETRIEVE_TIMEOUT_SEC)
     except FuturesTimeoutError:
         LOGGER.warning(
-            "LightRAG retrieval timed out after %.1f sec", RETRIEVE_TIMEOUT_SEC
+            "LightRAG native query timed out after %.1f sec", RETRIEVE_TIMEOUT_SEC
         )
-        return []
+        return {
+            "status": "failure",
+            "message": "LightRAG query timeout",
+            "data": {},
+            "metadata": {},
+            "llm_response": {
+                "content": "",
+                "response_iterator": None,
+                "is_streaming": False,
+            },
+        }
     except Exception as exc:
-        LOGGER.exception("LightRAG retrieval failed: %s", exc)
-        return []
-
-    if result.get("status") != "success":
-        return []
-
-    data = result.get("data", {})
-    chunks = data.get("chunks", [])
-    if not isinstance(chunks, list):
-        return []
-
-    retrieved: list[RetrievedChunk] = []
-    for chunk in chunks:
-        if not isinstance(chunk, dict):
-            continue
-        content = str(chunk.get("content", "")).strip()
-        if not content:
-            continue
-        chunk_id = str(chunk.get("chunk_id") or chunk.get("reference_id") or "")
-        source = str(chunk.get("file_path") or "unknown")
-        if not chunk_id:
-            continue
-        retrieved.append(
-            RetrievedChunk(
-                chunk_id=chunk_id,
-                source=source,
-                content=content,
-                score=None,
-            )
-        )
-    return retrieved
+        LOGGER.exception("LightRAG native query failed: %s", exc)
+        return {
+            "status": "failure",
+            "message": str(exc),
+            "data": {},
+            "metadata": {},
+            "llm_response": {
+                "content": "",
+                "response_iterator": None,
+                "is_streaming": False,
+            },
+        }

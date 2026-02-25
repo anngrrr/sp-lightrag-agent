@@ -5,10 +5,10 @@ description = "Minimal QA agent for construction standards."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "langchain-ollama>=1.0.1",
     "langgraph>=1.0.9",
     "lightrag-hku>=1.4.9.11",
     "nicegui>=3.8.0",
+    "ollama>=0.6.1",
     "pydantic>=2.12.5",
 ]
 
