@@ -18,13 +18,13 @@ from app.rag.retriever import retrieve
 
 load_dotenv()
 
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")
-OLLAMA_HOST = os.getenv("OLLAMA_HOST")
-OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
 MAX_CONTEXT_CHARS = int(os.getenv("RAG_CONTEXT_MAX_CHARS", "12000"))
 MAX_RESPONSE_CHARS = int(os.getenv("RAG_RESPONSE_MAX_CHARS", "1800"))
 MAX_CHUNKS_FOR_CONTEXT = int(os.getenv("RAG_MAX_CHUNKS_FOR_CONTEXT", "8"))
 MAX_CITATIONS = int(os.getenv("RAG_MAX_CITATIONS", "5"))
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
+OLLAMA_LLM_HOST = os.getenv("OLLAMA_LLM_HOST")
+OLLAMA_LLM_MODEL = os.getenv("OLLAMA_LLM_MODEL")
 
 _LLM: ChatOllama | None = None
 _GRAPH: Any | None = None
@@ -41,15 +41,15 @@ class AgentState(TypedDict):
 def _get_llm() -> ChatOllama:
     global _LLM
     if _LLM is None:
-        if not OLLAMA_MODEL or not OLLAMA_HOST:
-            raise RuntimeError("OLLAMA_MODEL and OLLAMA_HOST must be set in .env")
+        if not OLLAMA_LLM_MODEL or not OLLAMA_LLM_HOST:
+            raise RuntimeError("OLLAMA_LLM_MODEL and OLLAMA_LLM_HOST must be set in .env")
         if not OLLAMA_API_KEY:
             raise RuntimeError("OLLAMA_API_KEY must be set in .env")
 
         auth_headers = {"Authorization": f"Bearer {OLLAMA_API_KEY}"}
         _LLM = ChatOllama(
-            model=OLLAMA_MODEL,
-            base_url=OLLAMA_HOST,
+            model=OLLAMA_LLM_MODEL,
+            base_url=OLLAMA_LLM_HOST,
             temperature=0.1,
             num_predict=450,
             client_kwargs={"headers": auth_headers},

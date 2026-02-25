@@ -1,23 +1,32 @@
 import json
+import logging
 import os
+import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 
+from dotenv import load_dotenv
 from lightrag import LightRAG, QueryParam
-from lightrag.llm.ollama import ollama_embed
+from lightrag.llm.ollama import ollama_embed, ollama_model_complete
 from lightrag.utils import EmbeddingFunc
 
 from app.config import resolve_lightrag_dir
 from app.models.schemas import RetrievedChunk
 
+load_dotenv()
+
+LOGGER = logging.getLogger(__name__)
 RETRIEVE_MODE = os.getenv("RAG_RETRIEVE_MODE", "mix")
 RETRIEVE_TOP_K = int(os.getenv("RAG_RETRIEVE_TOP_K", "8"))
 RETRIEVE_CHUNK_TOP_K = int(os.getenv("RAG_RETRIEVE_CHUNK_TOP_K", "8"))
 RETRIEVE_TIMEOUT_SEC = float(os.getenv("RAG_RETRIEVE_TIMEOUT_SEC", "20"))
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text-v1.5")
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
+OLLAMA_LLM_HOST = os.getenv("OLLAMA_LLM_HOST")
+OLLAMA_LLM_MODEL = os.getenv("OLLAMA_LLM_MODEL")
+OLLAMA_EMBED_HOST = os.getenv("OLLAMA_EMBED_HOST")
+OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL")
 
 _RAG_INSTANCE: LightRAG | None = None
 _EXECUTOR = ThreadPoolExecutor(max_workers=1)
@@ -48,11 +57,18 @@ def _read_embedding_dim(storage_dir: Path) -> int:
 
 def _build_embedding_func(storage_dir: Path) -> EmbeddingFunc:
     embedding_dim = _read_embedding_dim(storage_dir)
+    embed_kwargs: dict[str, str] = {}
+    if OLLAMA_EMBED_MODEL:
+        embed_kwargs["embed_model"] = OLLAMA_EMBED_MODEL
+    if OLLAMA_EMBED_HOST:
+        embed_kwargs["host"] = OLLAMA_EMBED_HOST
+    if OLLAMA_API_KEY:
+        embed_kwargs["api_key"] = OLLAMA_API_KEY
     return EmbeddingFunc(
         embedding_dim=embedding_dim,
         max_token_size=8192,
         model_name=None,
-        func=partial(ollama_embed.func, embed_model=EMBED_MODEL, host=OLLAMA_HOST),
+        func=partial(ollama_embed.func, **embed_kwargs),
     )
 
 
@@ -63,11 +79,20 @@ def _get_rag() -> LightRAG:
 
     storage_dir = resolve_lightrag_dir()
     storage_dir.mkdir(parents=True, exist_ok=True)
+    if not OLLAMA_LLM_MODEL:
+        raise RuntimeError("OLLAMA_LLM_MODEL must be set in .env")
 
+    llm_kwargs: dict[str, str] = {"host": OLLAMA_LLM_HOST} if OLLAMA_LLM_HOST else {}
+    if OLLAMA_API_KEY:
+        llm_kwargs["api_key"] = OLLAMA_API_KEY
     _RAG_INSTANCE = LightRAG(
         working_dir=str(storage_dir),
+        llm_model_func=ollama_model_complete,
+        llm_model_name=OLLAMA_LLM_MODEL,
+        llm_model_kwargs=llm_kwargs,
         embedding_func=_build_embedding_func(storage_dir),
     )
+    asyncio.run(_RAG_INSTANCE.initialize_storages())
     return _RAG_INSTANCE
 
 
@@ -92,8 +117,10 @@ def retrieve(question: str) -> list[RetrievedChunk]:
     try:
         result = future.result(timeout=RETRIEVE_TIMEOUT_SEC)
     except FuturesTimeoutError:
+        LOGGER.warning("LightRAG retrieval timed out after %.1f sec", RETRIEVE_TIMEOUT_SEC)
         return []
-    except Exception:
+    except Exception as exc:
+        LOGGER.exception("LightRAG retrieval failed: %s", exc)
         return []
 
     if result.get("status") != "success":
