@@ -16,6 +16,3 @@ dependencies = [
 dev = [
     "ruff>=0.15.2",
 ]
-
-[tool.ty.src]
-exclude = ["*.ipynb", "**/*.ipynb", "**/**/*.ipynb", "**/**/**/*.ipynb"]
