@@ -23,7 +23,6 @@ RETRIEVE_MODE = os.getenv("RAG_RETRIEVE_MODE", "hybrid")
 RETRIEVE_TOP_K = int(os.getenv("RAG_RETRIEVE_TOP_K", "24"))
 RETRIEVE_CHUNK_TOP_K = int(os.getenv("RAG_RETRIEVE_CHUNK_TOP_K", "12"))
 RETRIEVE_TIMEOUT_SEC = float(os.getenv("RAG_RETRIEVE_TIMEOUT_SEC", "20"))
-RAG_ENABLE_RERANK = os.getenv("RAG_ENABLE_RERANK", "false").lower() == "true"
 RAG_MAX_ENTITY_TOKENS = int(os.getenv("RAG_MAX_ENTITY_TOKENS", "8000"))
 RAG_MAX_RELATION_TOKENS = int(os.getenv("RAG_MAX_RELATION_TOKENS", "8000"))
 RAG_MAX_TOTAL_TOKENS = int(os.getenv("RAG_MAX_TOTAL_TOKENS", "16000"))
@@ -121,7 +120,7 @@ def _query_data(question: str) -> dict[str, Any]:
             mode=_resolve_mode(RETRIEVE_MODE),
             top_k=RETRIEVE_TOP_K,
             chunk_top_k=RETRIEVE_CHUNK_TOP_K,
-            enable_rerank=RAG_ENABLE_RERANK,
+            enable_rerank=False,
             max_entity_tokens=RAG_MAX_ENTITY_TOKENS,
             max_relation_tokens=RAG_MAX_RELATION_TOKENS,
             max_total_tokens=RAG_MAX_TOTAL_TOKENS,
