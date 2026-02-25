@@ -1,21 +1,19 @@
-import os
-import re
 from typing import Any, cast
 
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
 from app.models.schemas import (
-    Citation,
     ChatInput,
     ChatOutput,
     ErrorInfo,
     GraphState,
     RetrievedChunk,
+    RetrievedEntity,
+    RetrievedReference,
+    RetrievedRelationship,
 )
 from app.rag.retriever import query_native
-
-MAX_CITATION_QUOTE_CHARS = int(os.getenv("RAG_CITATION_QUOTE_CHARS", "260"))
 
 _GRAPH: Any | None = None
 
@@ -23,8 +21,10 @@ _GRAPH: Any | None = None
 class AgentState(TypedDict):
     user_input: ChatInput
     retrieved_chunks: list[RetrievedChunk]
+    entities: list[RetrievedEntity]
+    relationships: list[RetrievedRelationship]
+    references: list[RetrievedReference]
     answer: str | None
-    citations: list[Citation]
     error: ErrorInfo | None
 
 
@@ -60,84 +60,89 @@ def _chunks_from_native_result(result: dict[str, Any]) -> list[RetrievedChunk]:
     return out
 
 
-def _extract_reference_ids(answer: str) -> list[str]:
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for match in re.finditer(r"\[(\d+)\]", answer):
-        ref_id = match.group(1)
-        if ref_id not in seen:
-            seen.add(ref_id)
-            ordered.append(ref_id)
-    return ordered
-
-
-def _citations_from_native_result(
-    result: dict[str, Any], answer: str
-) -> list[Citation]:
+def _entities_from_native_result(result: dict[str, Any]) -> list[RetrievedEntity]:
     data = result.get("data", {})
     if not isinstance(data, dict):
         return []
-
-    raw_chunks = data.get("chunks", [])
-    raw_references = data.get("references", [])
-    if not isinstance(raw_chunks, list):
+    entities = data.get("entities", [])
+    if not isinstance(entities, list):
         return []
 
-    by_ref: dict[str, list[RetrievedChunk]] = {}
-    for chunk in raw_chunks:
-        if not isinstance(chunk, dict):
+    out: list[RetrievedEntity] = []
+    for item in entities:
+        if not isinstance(item, dict):
             continue
-        content = str(chunk.get("content", "")).strip()
-        chunk_id = str(chunk.get("chunk_id") or "").strip()
-        source = str(chunk.get("file_path") or "unknown")
-        ref_id = str(chunk.get("reference_id") or "").strip()
-        if not content or not chunk_id:
+        entity_name = str(item.get("entity_name") or "").strip()
+        if not entity_name:
             continue
-        item = RetrievedChunk(
-            chunk_id=chunk_id,
-            source=source,
-            content=content,
-            score=None,
+        out.append(
+            RetrievedEntity(
+                entity_name=entity_name,
+                entity_type=str(item.get("entity_type") or "unknown"),
+                description=str(item.get("description") or "").strip(),
+                source=str(item.get("file_path") or "unknown"),
+            )
         )
-        if ref_id:
-            by_ref.setdefault(ref_id, []).append(item)
-        else:
-            by_ref.setdefault("_unref", []).append(item)
+    return out
 
-    reference_order = _extract_reference_ids(answer)
-    if not reference_order and isinstance(raw_references, list):
-        for ref in raw_references:
-            if not isinstance(ref, dict):
-                continue
-            ref_id = str(ref.get("reference_id") or "").strip()
-            if ref_id and ref_id not in reference_order:
-                reference_order.append(ref_id)
 
-    citations: list[Citation] = []
-    used_chunk_ids: set[str] = set()
+def _relationships_from_native_result(
+    result: dict[str, Any],
+) -> list[RetrievedRelationship]:
+    data = result.get("data", {})
+    if not isinstance(data, dict):
+        return []
+    relationships = data.get("relationships", [])
+    if not isinstance(relationships, list):
+        return []
 
-    for ref_id in reference_order:
-        chunks = by_ref.get(ref_id, [])
-        if not chunks:
+    out: list[RetrievedRelationship] = []
+    for item in relationships:
+        if not isinstance(item, dict):
             continue
-        for chunk in chunks:
-            if chunk.chunk_id in used_chunk_ids:
-                continue
-            used_chunk_ids.add(chunk.chunk_id)
-            quote = (
-                chunk.content.replace("\n", " ")
-                .strip()[:MAX_CITATION_QUOTE_CHARS]
-                .rstrip()
+        src_id = str(item.get("src_id") or "").strip()
+        tgt_id = str(item.get("tgt_id") or "").strip()
+        if not src_id or not tgt_id:
+            continue
+        weight_raw = item.get("weight")
+        weight: float | None = None
+        if isinstance(weight_raw, int | float):
+            weight = float(weight_raw)
+        out.append(
+            RetrievedRelationship(
+                src_id=src_id,
+                tgt_id=tgt_id,
+                description=str(item.get("description") or "").strip(),
+                keywords=str(item.get("keywords") or "").strip(),
+                weight=weight,
+                source=str(item.get("file_path") or "unknown"),
             )
-            citations.append(
-                Citation(
-                    source=chunk.source,
-                    chunk_id=chunk.chunk_id,
-                    quote=quote,
-                )
-            )
+        )
+    return out
 
-    return citations
+
+def _references_from_native_result(result: dict[str, Any]) -> list[RetrievedReference]:
+    data = result.get("data", {})
+    if not isinstance(data, dict):
+        return []
+    references = data.get("references", [])
+    if not isinstance(references, list):
+        return []
+
+    out: list[RetrievedReference] = []
+    for item in references:
+        if not isinstance(item, dict):
+            continue
+        ref_id = str(item.get("reference_id") or "").strip()
+        if not ref_id:
+            continue
+        out.append(
+            RetrievedReference(
+                reference_id=ref_id,
+                source=str(item.get("file_path") or "unknown"),
+            )
+        )
+    return out
 
 
 def _answer_from_native_result(result: dict[str, Any]) -> str:
@@ -169,24 +174,33 @@ def native_query_node(state: AgentState) -> dict[str, object]:
                 message=error_message,
             ).model_dump(),
             "retrieved_chunks": [],
-            "citations": [],
+            "entities": [],
+            "relationships": [],
+            "references": [],
         }
 
     chunks = _chunks_from_native_result(result)
+    entities = _entities_from_native_result(result)
+    relationships = _relationships_from_native_result(result)
+    references = _references_from_native_result(result)
     answer = _answer_from_native_result(result)
-    citations = _citations_from_native_result(result, answer)
     return {
         "answer": answer,
         "error": None,
         "retrieved_chunks": [chunk.model_dump() for chunk in chunks],
-        "citations": [citation.model_dump() for citation in citations],
+        "entities": [entity.model_dump() for entity in entities],
+        "relationships": [relation.model_dump() for relation in relationships],
+        "references": [reference.model_dump() for reference in references],
     }
 
 
 def state_to_output(state: GraphState) -> ChatOutput:
     return ChatOutput(
         answer=state.answer or "",
-        citations=state.citations,
+        retrieved_chunks=state.retrieved_chunks,
+        entities=state.entities,
+        relationships=state.relationships,
+        references=state.references,
         error=state.error,
     )
 

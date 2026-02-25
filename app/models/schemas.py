@@ -17,21 +17,41 @@ class RetrievedChunk(BaseModel):
     score: float | None = None
 
 
-class Citation(BaseModel):
+class RetrievedEntity(BaseModel):
+    entity_name: str
+    entity_type: str
+    description: str
     source: str
-    chunk_id: str
-    quote: str
+
+
+class RetrievedRelationship(BaseModel):
+    src_id: str
+    tgt_id: str
+    description: str
+    keywords: str
+    weight: float | None = None
+    source: str
+
+
+class RetrievedReference(BaseModel):
+    reference_id: str
+    source: str
 
 
 class ChatOutput(BaseModel):
     answer: str
-    citations: list[Citation] = Field(default_factory=list)
+    retrieved_chunks: list[RetrievedChunk] = Field(default_factory=list)
+    entities: list[RetrievedEntity] = Field(default_factory=list)
+    relationships: list[RetrievedRelationship] = Field(default_factory=list)
+    references: list[RetrievedReference] = Field(default_factory=list)
     error: ErrorInfo | None = None
 
 
 class GraphState(BaseModel):
     user_input: ChatInput
     retrieved_chunks: list[RetrievedChunk] = Field(default_factory=list)
+    entities: list[RetrievedEntity] = Field(default_factory=list)
+    relationships: list[RetrievedRelationship] = Field(default_factory=list)
+    references: list[RetrievedReference] = Field(default_factory=list)
     answer: str | None = None
-    citations: list[Citation] = Field(default_factory=list)
     error: ErrorInfo | None = None

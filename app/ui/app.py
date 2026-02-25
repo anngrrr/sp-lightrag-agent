@@ -2,6 +2,10 @@ from nicegui import run, ui
 
 from app.agent.graph import run_agent
 
+MAX_UI_ENTITIES = 10
+MAX_UI_RELATIONSHIPS = 10
+MAX_UI_CHUNKS = 12
+
 
 def build_ui() -> None:
     """Build the MVP chat page."""
@@ -30,31 +34,81 @@ def build_ui() -> None:
             with ui.card().classes("w-full"):
                 ui.label("User").classes("text-weight-bold")
                 ui.label(question)
-                answer_label = ui.label("Thinking...")
-                citations_column = ui.column().classes("w-full gap-1")
+                ui.label("Assistant").classes("text-weight-bold")
+                answer_markdown = ui.markdown("Thinking...")
+                grounding_column = ui.column().classes("w-full gap-2")
 
         try:
             result = await run.io_bound(run_agent, question)
-            answer_label.set_text(result.answer or "")
+            answer_markdown.set_content(result.answer or "")
             if result.error is not None:
                 ui.notify(
                     f"{result.error.code}: {result.error.message}", type="warning"
                 )
 
-            citations_column.clear()
-            if result.citations:
-                with citations_column:
-                    ui.separator()
-                    ui.label("Sources").classes("text-weight-bold")
-                    for idx, citation in enumerate(result.citations, start=1):
-                        with ui.card().classes("w-full"):
-                            ui.label(f"[{idx}] {citation.source}")
-                            ui.label(f"chunk_id: {citation.chunk_id}").classes(
-                                "text-caption"
-                            )
-                            ui.label(citation.quote)
+            grounding_column.clear()
+            with grounding_column:
+                ui.separator()
+                ui.label("Grounding summary").classes("text-weight-bold")
+                ui.label(
+                    f"References: {len(result.references)} | "
+                    f"Entities: {len(result.entities)} | "
+                    f"Relationships: {len(result.relationships)} | "
+                    f"Chunks: {len(result.retrieved_chunks)}"
+                ).classes("text-caption")
+
+                if result.references:
+                    with ui.expansion(
+                        "Reference documents", icon="description"
+                    ).classes("w-full"):
+                        for ref in result.references:
+                            ui.label(f"[{ref.reference_id}] {ref.source}")
+
+                if result.entities:
+                    with ui.expansion("Key entities", icon="hub").classes("w-full"):
+                        for entity in result.entities[:MAX_UI_ENTITIES]:
+                            with ui.card().classes("w-full"):
+                                ui.label(
+                                    f"{entity.entity_name} ({entity.entity_type})"
+                                ).classes("text-weight-medium")
+                                if entity.description:
+                                    ui.label(entity.description)
+                                ui.label(entity.source).classes("text-caption")
+
+                if result.relationships:
+                    with ui.expansion("Key relationships", icon="account_tree").classes(
+                        "w-full"
+                    ):
+                        for rel in result.relationships[:MAX_UI_RELATIONSHIPS]:
+                            with ui.card().classes("w-full"):
+                                ui.label(f"{rel.src_id} -> {rel.tgt_id}").classes(
+                                    "text-weight-medium"
+                                )
+                                if rel.description:
+                                    ui.label(rel.description)
+                                if rel.keywords:
+                                    ui.label(f"keywords: {rel.keywords}").classes(
+                                        "text-caption"
+                                    )
+                                if rel.weight is not None:
+                                    ui.label(f"weight: {rel.weight:.3f}").classes(
+                                        "text-caption"
+                                    )
+                                ui.label(rel.source).classes("text-caption")
+
+                if result.retrieved_chunks:
+                    with ui.expansion("Retrieved chunks", icon="article").classes(
+                        "w-full"
+                    ):
+                        for chunk in result.retrieved_chunks[:MAX_UI_CHUNKS]:
+                            with ui.card().classes("w-full"):
+                                ui.label(chunk.source).classes("text-weight-medium")
+                                ui.label(f"chunk_id: {chunk.chunk_id}").classes(
+                                    "text-caption"
+                                )
+                                ui.label(chunk.content)
         except Exception as exc:
-            answer_label.set_text("Request failed")
+            answer_markdown.set_content("Request failed")
             ui.notify(str(exc), type="negative")
         finally:
             send_button.enable()
