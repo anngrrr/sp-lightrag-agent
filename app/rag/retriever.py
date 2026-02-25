@@ -27,6 +27,10 @@ RAG_MAX_ENTITY_TOKENS = int(os.getenv("RAG_MAX_ENTITY_TOKENS", "8000"))
 RAG_MAX_RELATION_TOKENS = int(os.getenv("RAG_MAX_RELATION_TOKENS", "8000"))
 RAG_MAX_TOTAL_TOKENS = int(os.getenv("RAG_MAX_TOTAL_TOKENS", "16000"))
 RAG_KEYWORD_LLM_TIMEOUT_SEC = float(os.getenv("RAG_KEYWORD_LLM_TIMEOUT_SEC", "120"))
+RAG_ENABLE_LLM_CACHE = os.getenv("RAG_ENABLE_LLM_CACHE", "true").lower() == "true"
+RAG_CLEAR_LLM_CACHE_ON_START = (
+    os.getenv("RAG_CLEAR_LLM_CACHE_ON_START", "true").lower() == "true"
+)
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
 OLLAMA_LLM_HOST = os.getenv("OLLAMA_LLM_HOST")
 OLLAMA_LLM_MODEL = os.getenv("OLLAMA_LLM_MODEL")
@@ -98,8 +102,15 @@ def _get_rag() -> LightRAG:
         llm_model_name=OLLAMA_LLM_MODEL,
         llm_model_kwargs=llm_kwargs,
         embedding_func=_build_embedding_func(storage_dir),
+        enable_llm_cache=RAG_ENABLE_LLM_CACHE,
     )
     asyncio.run(_RAG_INSTANCE.initialize_storages())
+    if RAG_CLEAR_LLM_CACHE_ON_START:
+        try:
+            _RAG_INSTANCE.clear_cache()
+            LOGGER.info("LightRAG LLM cache cleared on startup")
+        except Exception as exc:
+            LOGGER.warning("Failed to clear LightRAG LLM cache on startup: %s", exc)
     return _RAG_INSTANCE
 
 
