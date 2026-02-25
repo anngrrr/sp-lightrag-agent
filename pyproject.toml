@@ -1,7 +1,7 @@
 [project]
 name = "sp-lightrag-agent"
 version = "0.1.0"
-description = "Minimal QA agent for construction standards."
+ddescription = "Q&A по строительным нормам на русском языке с локальным LightRAG."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
